@@ -39,6 +39,7 @@ static void (*frame_callback)(void) = NULL;
     NSWindow *window;
     CView *view;
 }
+
 - (void)applicationDidFinishLaunching:(NSNotification *)notification {
     window = [[NSWindow alloc]
               initWithContentRect:NSMakeRect(100, 100, bufferWidth, bufferHeight)
@@ -50,16 +51,19 @@ static void (*frame_callback)(void) = NULL;
     [window makeKeyAndOrderFront:nil];
     [NSApp activateIgnoringOtherApps:YES];
 
-    timer = [NSTimer scheduledTimerWithTimeInterval:1.0/60.0
-                                              target:self
-                                            selector:@selector(tick)
-                                            userInfo:nil
-                                             repeats:YES];
+    // Hardcoded 60 FPS timer
+    timer = [NSTimer scheduledTimerWithTimeInterval:(1.0 / 24.0)
+                                             target:self
+                                           selector:@selector(tick)
+                                           userInfo:nil
+                                            repeats:YES];
 }
+
 - (void)tick {
     if (frame_callback) frame_callback();
     [view setNeedsDisplay:YES];
 }
+
 @end
 
 // C-callable entry point
@@ -78,7 +82,7 @@ void cocoa_start(int width, int height, void (*callback)(void)) {
     }
 }
 
-void draw_pixel(int x, int y, uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
+void draw_pixel(int x, int y, uint8_t a, uint8_t b, uint8_t g, uint8_t r) {
     if (!pixelBuffer || x < 0 || y < 0 || x >= bufferWidth || y >= bufferHeight) return;
     int offset = (y * bufferWidth + x) * 4;
     pixelBuffer[offset + 0] = r;
@@ -88,5 +92,5 @@ void draw_pixel(int x, int y, uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
 }
 
 void present_frame(void) {
-    // handled by view refresh after tick
+    // no-op, handled by view refresh after tick
 }

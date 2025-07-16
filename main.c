@@ -34,6 +34,7 @@ typedef struct
 
 Mesh cubeMesh;
 Matrix4x4 projectionMatrix;
+Vector3 Camera;
 float theta = 0.0f;
 
 void MultiplyMatrixVector(const Vector3 *in, Vector3 *out, const Matrix4x4 *m)
@@ -87,11 +88,70 @@ void DrawTriangle(int x1, int y1, int x2, int y2, int x3, int y3)
     DrawLine(x3, y3, x1, y1);
 }
 
+void FillTriangle(int x1, int y1, int x2, int y2, int x3, int y3, uint8_t r, uint8_t g, uint8_t b, uint8_t a)
+{
+    // Sort the points by y-coordinate ascending (y1 <= y2 <= y3)
+    if (y1 > y2)
+    {
+        int t = y1;
+        y1 = y2;
+        y2 = t;
+        t = x1;
+        x1 = x2;
+        x2 = t;
+    }
+    if (y1 > y3)
+    {
+        int t = y1;
+        y1 = y3;
+        y3 = t;
+        t = x1;
+        x1 = x3;
+        x3 = t;
+    }
+    if (y2 > y3)
+    {
+        int t = y2;
+        y2 = y3;
+        y3 = t;
+        t = x2;
+        x2 = x3;
+        x3 = t;
+    }
+
+    int total_height = y3 - y1;
+    for (int i = 0; i < total_height; i++)
+    {
+        int second_half = i > y2 - y1 || y2 == y1;
+        int segment_height = second_half ? y3 - y2 : y2 - y1;
+        float alpha = total_height == 0 ? 0.0f : (float)i / total_height;
+        float beta = segment_height == 0 ? 0.0f : (float)(i - (second_half ? y2 - y1 : 0)) / segment_height;
+
+        int ax = x1 + (int)((x3 - x1) * alpha);
+        int bx = second_half
+                     ? x2 + (int)((x3 - x2) * beta)
+                     : x1 + (int)((x2 - x1) * beta);
+        int ay = y1 + i;
+        int by = ay;
+        if (ax > bx)
+        {
+            int t = ax;
+            ax = bx;
+            bx = t;
+        }
+        for (int j = ax; j <= bx; j++)
+        {
+            if (j >= 0 && j < SCREEN_WIDTH && ay >= 0 && ay < SCREEN_HEIGHT)
+                draw_pixel(j, ay, r, g, b, a);
+        }
+    }
+}
+
 void ClearScreen()
 {
     for (int y = 0; y < SCREEN_HEIGHT; y++)
         for (int x = 0; x < SCREEN_WIDTH; x++)
-            draw_pixel(x, y, 12, 12, 12, 255);
+            draw_pixel(x, y, 0, 0, 0, 0); // black
 }
 
 void InitEngine()
@@ -100,7 +160,7 @@ void InitEngine()
     cubeMesh.triangles = malloc(sizeof(Triangle) * cubeMesh.triangleCount);
 
     Vector3 vertices[] = {
-        {0, 0, 0}, {0, 1, 0}, {1, 1, 0}, {1, 0, 0}, {1, 0, 1}, {1, 1, 1}, {0, 1, 1}, {0, 0, 1}};
+        {-0.5f, -0.5f, -0.5f}, {-0.5f, 0.5f, -0.5f}, {0.5f, 0.5f, -0.5f}, {0.5f, -0.5f, -0.5f}, {0.5f, -0.5f, 0.5f}, {0.5f, 0.5f, 0.5f}, {-0.5f, 0.5f, 0.5f}, {-0.5f, -0.5f, 0.5f}};
 
     Triangle tris[] = {
         {vertices[0], vertices[1], vertices[2]}, {vertices[0], vertices[2], vertices[3]}, // SOUTH
@@ -172,6 +232,40 @@ void Tick()
         for (int j = 0; j < 3; j++)
             translated.points[j].z += 3.0f;
 
+        Vector3 normal, line1, line2;
+        line1.x = translated.points[1].x - translated.points[0].x;
+        line1.y = translated.points[1].y - translated.points[0].y;
+        line1.z = translated.points[1].z - translated.points[0].z;
+
+        line2.x = translated.points[2].x - translated.points[0].x;
+        line2.y = translated.points[2].y - translated.points[0].y;
+        line2.z = translated.points[2].z - translated.points[0].z;
+
+        normal.x = line1.y * line2.z - line1.z * line2.y;
+        normal.y = line1.z * line2.x - line1.x * line2.z;
+        normal.z = line1.x * line2.y - line1.y * line2.x;
+
+        float length = sqrtf(normal.x * normal.x + normal.y * normal.y + normal.z * normal.z);
+        normal.x /= length;
+        normal.y /= length;
+        normal.z /= length;
+
+        if (normal.x * (translated.points[0].x - Camera.x) +
+                normal.y * (translated.points[0].y - Camera.y) +
+                normal.z * (translated.points[0].z - Camera.z) >
+            0.0f)
+            continue; // Culling based on camera position
+
+        Vector3 lightDirection = {0.0f, 0.0f, -1.0f};
+        float lightLength = sqrtf(lightDirection.x * lightDirection.x +
+                                  lightDirection.y * lightDirection.y +
+                                  lightDirection.z * lightDirection.z);
+        lightDirection.x /= lightLength;
+        lightDirection.y /= lightLength;
+        lightDirection.z /= lightLength;
+
+        float dotProduct = normal.x * lightDirection.x + normal.y * lightDirection.y + normal.z * lightDirection.z;
+
         for (int j = 0; j < 3; j++)
             MultiplyMatrixVector(&translated.points[j], &projected.points[j], &projectionMatrix);
 
@@ -183,10 +277,22 @@ void Tick()
             projected.points[j].y *= 0.5f * SCREEN_HEIGHT;
         }
 
-        DrawTriangle(
+        // Clamp dotProduct to [0, 1]
+        float shade = dotProduct;
+        if (shade < 0)
+            shade = 0;
+        if (shade > 1)
+            shade = 1;
+
+        // Calculate shaded color (white base)
+        uint8_t r = (uint8_t)(255 * shade);
+        uint8_t g = (uint8_t)(255 * shade);
+        uint8_t b = (uint8_t)(255 * shade);
+
+        FillTriangle(
             (int)projected.points[0].x, (int)projected.points[0].y,
             (int)projected.points[1].x, (int)projected.points[1].y,
-            (int)projected.points[2].x, (int)projected.points[2].y);
+            (int)projected.points[2].x, (int)projected.points[2].y, r, g, b, 255);
     }
 
     present_frame();
