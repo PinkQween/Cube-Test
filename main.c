@@ -1,82 +1,78 @@
-#include <stdint.h>
-#include <stdio.h>
-#include <stdlib.h>
 #include <math.h>
-
-#define WIDTH 400
-#define HEIGHT 400
-#define ARRAY_LEN(arr) (sizeof(arr) / sizeof((arr)[0]))
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdio.h>
 
 extern void cocoa_start(int width, int height, void (*callback)(void));
 extern void draw_pixel(int x, int y, uint8_t r, uint8_t g, uint8_t b, uint8_t a);
 extern void present_frame(void);
 
-typedef struct
-{
-    int x, y;
-} Vector2D;
+#define SCREEN_WIDTH 800
+#define SCREEN_HEIGHT 800
 
 typedef struct
 {
     float x, y, z;
-} Vector3D;
+} Vector3;
 
 typedef struct
 {
-    Vector3D p[3];
+    Vector3 points[3];
 } Triangle;
 
 typedef struct
 {
-    Triangle *tris;
+    Triangle *triangles;
+    size_t triangleCount;
 } Mesh;
-
-#define V3(x, y, z) ((Vector3D){x, y, z})
-#define TRI(a, b, c) ((Triangle){.p = {a, b, c}})
 
 typedef struct
 {
     float m[4][4];
 } Matrix4x4;
 
-void make_rotation_z(Matrix4x4 *m, float theta);
-void make_rotation_x(Matrix4x4 *m, float theta);
+Mesh cubeMesh;
+Matrix4x4 projectionMatrix;
+float theta = 0.0f;
 
-void MultiplyMatrixVector(const Vector3D *i, Vector3D *o, const Matrix4x4 *m)
+void MultiplyMatrixVector(const Vector3 *in, Vector3 *out, const Matrix4x4 *m)
 {
-    o->x = i->x * m->m[0][0] + i->y * m->m[1][0] + i->z * m->m[2][0] + m->m[3][0];
-    o->y = i->x * m->m[0][1] + i->y * m->m[1][1] + i->z * m->m[2][1] + m->m[3][1];
-    o->z = i->x * m->m[0][2] + i->y * m->m[1][2] + i->z * m->m[2][2] + m->m[3][2];
-    float w = i->x * m->m[0][3] + i->y * m->m[1][3] + i->z * m->m[2][3] + m->m[3][3];
+    float x = in->x, y = in->y, z = in->z;
+    out->x = x * m->m[0][0] + y * m->m[1][0] + z * m->m[2][0] + m->m[3][0];
+    out->y = x * m->m[0][1] + y * m->m[1][1] + z * m->m[2][1] + m->m[3][1];
+    out->z = x * m->m[0][2] + y * m->m[1][2] + z * m->m[2][2] + m->m[3][2];
+    float w = x * m->m[0][3] + y * m->m[1][3] + z * m->m[2][3] + m->m[3][3];
 
     if (w != 0.0f)
     {
-        o->x /= w;
-        o->y /= w;
-        o->z /= w;
+        out->x /= w;
+        out->y /= w;
+        out->z /= w;
     }
 }
 
-void draw_line(int x0, int y0, int x1, int y1, uint8_t r, uint8_t g, uint8_t b, uint8_t a)
+void DrawLine(int x0, int y0, int x1, int y1)
 {
-    int dx = abs(x1 - x0);
-    int dy = abs(y1 - y0);
-    int sx = (x0 < x1) ? 1 : -1;
-    int sy = (y0 < y1) ? 1 : -1;
-    int err = dx - dy;
+    int dx = abs(x1 - x0), sx = x0 < x1 ? 1 : -1;
+    int dy = -abs(y1 - y0), sy = y0 < y1 ? 1 : -1;
+    int err = dx + dy, e2;
 
     while (1)
     {
-        draw_pixel(x0, y0, r, g, b, a);
+        if (x0 >= 0 && x0 < SCREEN_WIDTH && y0 >= 0 && y0 < SCREEN_HEIGHT)
+            draw_pixel(x0, y0, 255, 255, 255, 255);
+
         if (x0 == x1 && y0 == y1)
             break;
-        int e2 = err * 2;
-        if (e2 > -dy)
+
+        e2 = 2 * err;
+        if (e2 >= dy)
         {
-            err -= dy;
+            err += dy;
             x0 += sx;
         }
-        if (e2 < dx)
+        if (e2 <= dx)
         {
             err += dx;
             y0 += sy;
@@ -84,170 +80,121 @@ void draw_line(int x0, int y0, int x1, int y1, uint8_t r, uint8_t g, uint8_t b, 
     }
 }
 
-void draw_trangle(int x0, int y0, int x1, int y1, int x2, int y2, uint8_t r, uint8_t g, uint8_t b, uint8_t a)
+void DrawTriangle(int x1, int y1, int x2, int y2, int x3, int y3)
 {
-    draw_line(x0, y0, x1, y1, r, g, b, a);
-    draw_line(x1, y1, x2, y2, r, g, b, a);
-    draw_line(x2, y2, x0, y0, r, g, b, a);
+    DrawLine(x1, y1, x2, y2);
+    DrawLine(x2, y2, x3, y3);
+    DrawLine(x3, y3, x1, y1);
 }
 
-int frame = 0;
-
-void update_frame()
+void ClearScreen()
 {
-    // for (int y = 0; y < HEIGHT; y++)
-    // {
-    //     for (int x = 0; x < WIDTH; x++)
-    //     {
-    //         draw_pixel(x, y, (x + frame) % 255, (y + frame) % 255, 128, 255);
-    //     }
-    // }
-    // present_frame();
-    // frame++;
+    for (int y = 0; y < SCREEN_HEIGHT; y++)
+        for (int x = 0; x < SCREEN_WIDTH; x++)
+            draw_pixel(x, y, 12, 12, 12, 255);
+}
 
-    for (int y = 0; y < HEIGHT; y++)
-    {
-        for (int x = 0; x < WIDTH; x++)
-        {
-            draw_pixel(x, y, 0, 0, 0, 155); // Clear the screen to black
-        }
-    }
+void InitEngine()
+{
+    cubeMesh.triangleCount = 12;
+    cubeMesh.triangles = malloc(sizeof(Triangle) * cubeMesh.triangleCount);
 
-    static Triangle cube_tris[] = {
-        // Front face (z = 0)
-        TRI(V3(0, 0, 0), V3(1, 0, 0), V3(1, 1, 0)),
-        TRI(V3(0, 0, 0), V3(1, 1, 0), V3(0, 1, 0)),
+    Vector3 vertices[] = {
+        {0, 0, 0}, {0, 1, 0}, {1, 1, 0}, {1, 0, 0}, {1, 0, 1}, {1, 1, 1}, {0, 1, 1}, {0, 0, 1}};
 
-        // Back face (z = 1)
-        TRI(V3(0, 0, 1), V3(1, 1, 1), V3(1, 0, 1)),
-        TRI(V3(0, 0, 1), V3(0, 1, 1), V3(1, 1, 1)),
-
-        // Left face (x = 0)
-        TRI(V3(0, 0, 0), V3(0, 1, 1), V3(0, 0, 1)),
-        TRI(V3(0, 0, 0), V3(0, 1, 0), V3(0, 1, 1)),
-
-        // Right face (x = 1)
-        TRI(V3(1, 0, 0), V3(1, 0, 1), V3(1, 1, 1)),
-        TRI(V3(1, 0, 0), V3(1, 1, 1), V3(1, 1, 0)),
-
-        // Top face (y = 1)
-        TRI(V3(0, 1, 0), V3(1, 1, 1), V3(1, 1, 0)),
-        TRI(V3(0, 1, 0), V3(0, 1, 1), V3(1, 1, 1)),
-
-        // Bottom face (y = 0)
-        TRI(V3(0, 0, 0), V3(1, 0, 1), V3(1, 0, 0)),
-        TRI(V3(0, 0, 0), V3(0, 0, 1), V3(1, 0, 1)),
+    Triangle tris[] = {
+        {vertices[0], vertices[1], vertices[2]}, {vertices[0], vertices[2], vertices[3]}, // SOUTH
+        {vertices[3], vertices[2], vertices[5]},
+        {vertices[3], vertices[5], vertices[4]}, // EAST
+        {vertices[4], vertices[5], vertices[6]},
+        {vertices[4], vertices[6], vertices[7]}, // NORTH
+        {vertices[7], vertices[6], vertices[1]},
+        {vertices[7], vertices[1], vertices[0]}, // WEST
+        {vertices[1], vertices[6], vertices[5]},
+        {vertices[1], vertices[5], vertices[2]}, // TOP
+        {vertices[4], vertices[7], vertices[0]},
+        {vertices[4], vertices[0], vertices[3]} // BOTTOM
     };
 
-    static Mesh cube = {
-        .tris = cube_tris};
+    memcpy(cubeMesh.triangles, tris, sizeof(tris));
 
-    float fNear = 0.1f;
-    float fFar = 1000.0f;
-    float fFov = 145.0f;
-    float fAspectRation = (float)WIDTH / (float)HEIGHT;
-    float fFovRad = 1.0f / tanf(fFov * 0.5f * (3.14159265358979323846f / 180.0f));
+    float nearPlane = 0.1f;
+    float farPlane = 1000.0f;
+    float fov = 90.0f;
+    float aspectRatio = (float)SCREEN_HEIGHT / (float)SCREEN_WIDTH;
+    float fovRad = 1.0f / tanf(fov * 0.5f * (3.14159f / 180.0f));
 
-    Matrix4x4 projection = {0};
-    projection.m[0][0] = fAspectRation * fFovRad;
-    projection.m[1][1] = fFovRad;
-    projection.m[2][2] = fFar / (fFar - fNear);
-    projection.m[3][2] = (-fFar * fNear) / (fFar - fNear);
-    projection.m[2][3] = 1.0f;
-    projection.m[3][3] = 0.0f;
+    memset(&projectionMatrix, 0, sizeof(projectionMatrix));
+    projectionMatrix.m[0][0] = aspectRatio * fovRad;
+    projectionMatrix.m[1][1] = fovRad;
+    projectionMatrix.m[2][2] = farPlane / (farPlane - nearPlane);
+    projectionMatrix.m[3][2] = (-farPlane * nearPlane) / (farPlane - nearPlane);
+    projectionMatrix.m[2][3] = 1.0f;
+    projectionMatrix.m[3][3] = 0.0f;
+}
 
-    float theta = frame * 0.02f; // Adjust speed as desired
+void Tick()
+{
+    static int frameCount = 0;
+    printf("Frame: %d\n", frameCount++);
+    ClearScreen();
 
-    Matrix4x4 rotZ, rotX;
-    make_rotation_z(&rotZ, theta);
-    make_rotation_x(&rotX, theta * 0.5f);
+    theta += 0.05f;
 
-    for (int i = 0; i < ARRAY_LEN(cube_tris); i++)
+    Matrix4x4 rotationZ = {0};
+    Matrix4x4 rotationX = {0};
+
+    rotationZ.m[0][0] = cosf(theta);
+    rotationZ.m[0][1] = sinf(theta);
+    rotationZ.m[1][0] = -sinf(theta);
+    rotationZ.m[1][1] = cosf(theta);
+    rotationZ.m[2][2] = 1.0f;
+    rotationZ.m[3][3] = 1.0f;
+
+    rotationX.m[0][0] = 1.0f;
+    rotationX.m[1][1] = cosf(theta * 0.5f);
+    rotationX.m[1][2] = sinf(theta * 0.5f);
+    rotationX.m[2][1] = -sinf(theta * 0.5f);
+    rotationX.m[2][2] = cosf(theta * 0.5f);
+    rotationX.m[3][3] = 1.0f;
+
+    for (size_t i = 0; i < cubeMesh.triangleCount; i++)
     {
-        Triangle *tri = &cube.tris[i];
-        Triangle rotated, projected;
+        Triangle projected, translated, rotatedZ, rotatedZX;
 
-        // Rotate in Z
-        MultiplyMatrixVector(&tri->p[0], &rotated.p[0], &rotZ);
-        MultiplyMatrixVector(&tri->p[1], &rotated.p[1], &rotZ);
-        MultiplyMatrixVector(&tri->p[2], &rotated.p[2], &rotZ);
+        for (int j = 0; j < 3; j++)
+            MultiplyMatrixVector(&cubeMesh.triangles[i].points[j], &rotatedZ.points[j], &rotationZ);
 
-        // Rotate in X
-        MultiplyMatrixVector(&rotated.p[0], &rotated.p[0], &rotX);
-        MultiplyMatrixVector(&rotated.p[1], &rotated.p[1], &rotX);
-        MultiplyMatrixVector(&rotated.p[2], &rotated.p[2], &rotX);
+        for (int j = 0; j < 3; j++)
+            MultiplyMatrixVector(&rotatedZ.points[j], &rotatedZX.points[j], &rotationX);
 
-        // Offset into the screen (so the cube is in front of the camera)
-        rotated.p[0].z += 2.0f;
-        rotated.p[1].z += 2.0f;
-        rotated.p[2].z += 2.0f;
+        translated = rotatedZX;
+        for (int j = 0; j < 3; j++)
+            translated.points[j].z += 3.0f;
 
-        // Project
-        MultiplyMatrixVector(&rotated.p[0], &projected.p[0], &projection);
-        MultiplyMatrixVector(&rotated.p[1], &projected.p[1], &projection);
-        MultiplyMatrixVector(&rotated.p[2], &projected.p[2], &projection);
+        for (int j = 0; j < 3; j++)
+            MultiplyMatrixVector(&translated.points[j], &projected.points[j], &projectionMatrix);
 
-        // Map to screen
-        projected.p[0].x = (projected.p[0].x + 1.0f) * 0.5f * WIDTH;
-        projected.p[0].y = (projected.p[0].y + 1.0f) * 0.5f * HEIGHT;
-        projected.p[1].x = (projected.p[1].x + 1.0f) * 0.5f * WIDTH;
-        projected.p[1].y = (projected.p[1].y + 1.0f) * 0.5f * HEIGHT;
-        projected.p[2].x = (projected.p[2].x + 1.0f) * 0.5f * WIDTH;
-        projected.p[2].y = (projected.p[2].y + 1.0f) * 0.5f * HEIGHT;
+        for (int j = 0; j < 3; j++)
+        {
+            projected.points[j].x += 1.0f;
+            projected.points[j].y += 1.0f;
+            projected.points[j].x *= 0.5f * SCREEN_WIDTH;
+            projected.points[j].y *= 0.5f * SCREEN_HEIGHT;
+        }
 
-        draw_trangle(
-            projected.p[0].x, projected.p[0].y,
-            projected.p[1].x, projected.p[1].y,
-            projected.p[2].x, projected.p[2].y,
-            255, 255, 255, 255);
+        DrawTriangle(
+            (int)projected.points[0].x, (int)projected.points[0].y,
+            (int)projected.points[1].x, (int)projected.points[1].y,
+            (int)projected.points[2].x, (int)projected.points[2].y);
     }
 
     present_frame();
-    frame++;
-}
-
-void make_rotation_z(Matrix4x4 *m, float theta)
-{
-    m->m[0][0] = cosf(theta);
-    m->m[0][1] = sinf(theta);
-    m->m[0][2] = 0.0f;
-    m->m[0][3] = 0.0f;
-    m->m[1][0] = -sinf(theta);
-    m->m[1][1] = cosf(theta);
-    m->m[1][2] = 0.0f;
-    m->m[1][3] = 0.0f;
-    m->m[2][0] = 0.0f;
-    m->m[2][1] = 0.0f;
-    m->m[2][2] = 1.0f;
-    m->m[2][3] = 0.0f;
-    m->m[3][0] = 0.0f;
-    m->m[3][1] = 0.0f;
-    m->m[3][2] = 0.0f;
-    m->m[3][3] = 1.0f;
-}
-
-void make_rotation_x(Matrix4x4 *m, float theta)
-{
-    m->m[0][0] = 1.0f;
-    m->m[0][1] = 0.0f;
-    m->m[0][2] = 0.0f;
-    m->m[0][3] = 0.0f;
-    m->m[1][0] = 0.0f;
-    m->m[1][1] = cosf(theta);
-    m->m[1][2] = sinf(theta);
-    m->m[1][3] = 0.0f;
-    m->m[2][0] = 0.0f;
-    m->m[2][1] = -sinf(theta);
-    m->m[2][2] = cosf(theta);
-    m->m[2][3] = 0.0f;
-    m->m[3][0] = 0.0f;
-    m->m[3][1] = 0.0f;
-    m->m[3][2] = 0.0f;
-    m->m[3][3] = 1.0f;
 }
 
 int main()
 {
-    cocoa_start(WIDTH, HEIGHT, update_frame);
+    InitEngine();
+    cocoa_start(SCREEN_WIDTH, SCREEN_HEIGHT, Tick);
     return 0;
 }
