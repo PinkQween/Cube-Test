@@ -10,10 +10,21 @@
 extern void cocoa_start(int width, int height, int maxFPS, void (*callback)(void));
 extern void draw_pixel(int x, int y, uint8_t r, uint8_t g, uint8_t b, uint8_t a);
 extern void present_frame(void);
+extern int cocoa_is_key_down(int keycode); // key state from cocoa_bridge
 
 #define SCREEN_WIDTH 800
 #define SCREEN_HEIGHT 800
 #define LINE_MAX_LEN 128
+
+// macOS virtual key codes for WASD and arrows
+#define KEY_W 13
+#define KEY_A 0
+#define KEY_S 1
+#define KEY_D 2
+#define KEY_UP 126
+#define KEY_DOWN 125
+#define KEY_LEFT 123
+#define KEY_RIGHT 124
 
 // Ambient light intensity (minimum light)
 static const float AMBIENT_LIGHT_INTENSITY = 0.8f;
@@ -23,6 +34,11 @@ typedef struct
 {
     float x, y, z;
 } Vector3;
+
+typedef struct
+{
+    float x, y, z, w;
+} Vector4;
 
 typedef struct
 {
@@ -86,6 +102,14 @@ static inline Vector3 vec3_normalize(Vector3 a)
 static inline Vector3 vec3_copy(Vector3 a)
 {
     return a;
+}
+static inline Vector4 vec4_from_vec3(Vector3 a, float w)
+{
+    return (Vector4){a.x, a.y, a.z, w};
+}
+static inline Vector3 vec3_from_vec4(Vector4 a)
+{
+    return (Vector3){a.x, a.y, a.z};
 }
 // --- Matrix4x4 Math Utilities ---
 // Set matrix to identity
@@ -205,7 +229,9 @@ bool LoadFromObjectFile(Mesh *m, const char *filename)
 // --- Global State ---
 Mesh cubeMesh;
 Matrix4x4 projectionMatrix;
-Vector3 Camera = {0};
+Vector3 Camera = {0.0f, 0.0f, 0.0f};
+Vector3 LookDir = {0.0f, 0.0f, 1.0f};
+float Yaw = 0.0f;
 float theta = 0.0f;
 
 // --- Matrix-Vector Multiplication ---
@@ -223,7 +249,60 @@ void MultiplyMatrixVector(const Vector3 *in, Vector3 *out, const Matrix4x4 *m)
         out->z /= w;
     }
 }
+// --- Vector3 Math Utilities ---
+// --- Matrix-Vector Multiplication (Vector4) ---
+void MultiplyMatrixVector4(const Vector4 *in, Vector4 *out, const Matrix4x4 *m)
+{
+    float x = in->x, y = in->y, z = in->z, w = in->w;
+    out->x = x * m->m[0][0] + y * m->m[1][0] + z * m->m[2][0] + w * m->m[3][0];
+    out->y = x * m->m[0][1] + y * m->m[1][1] + z * m->m[2][1] + w * m->m[3][1];
+    out->z = x * m->m[0][2] + y * m->m[1][2] + z * m->m[2][2] + w * m->m[3][2];
+    out->w = x * m->m[0][3] + y * m->m[1][3] + z * m->m[2][3] + w * m->m[3][3];
+}
 
+// --- Camera/View Matrix Utilities ---
+Matrix4x4 Matrix_PointAt(Vector3 pos, Vector3 target, Vector3 up)
+{
+    Vector3 newForward = vec3_normalize(vec3_sub(target, pos));
+    Vector3 a = vec3_scale(newForward, vec3_dot(up, newForward));
+    Vector3 newUp = vec3_normalize(vec3_sub(up, a));
+    Vector3 newRight = vec3_cross(newUp, newForward);
+    Matrix4x4 matrix;
+    mat4x4_identity(&matrix);
+    matrix.m[0][0] = newRight.x;
+    matrix.m[0][1] = newRight.y;
+    matrix.m[0][2] = newRight.z;
+    matrix.m[1][0] = newUp.x;
+    matrix.m[1][1] = newUp.y;
+    matrix.m[1][2] = newUp.z;
+    matrix.m[2][0] = newForward.x;
+    matrix.m[2][1] = newForward.y;
+    matrix.m[2][2] = newForward.z;
+    matrix.m[3][0] = pos.x;
+    matrix.m[3][1] = pos.y;
+    matrix.m[3][2] = pos.z;
+    matrix.m[3][3] = 1.0f;
+    return matrix;
+}
+
+Matrix4x4 Matrix_QuickInverse(const Matrix4x4 *m)
+{
+    Matrix4x4 inv;
+    mat4x4_identity(&inv);
+    inv.m[0][0] = m->m[0][0];
+    inv.m[0][1] = m->m[1][0];
+    inv.m[0][2] = m->m[2][0];
+    inv.m[1][0] = m->m[0][1];
+    inv.m[1][1] = m->m[1][1];
+    inv.m[1][2] = m->m[2][1];
+    inv.m[2][0] = m->m[0][2];
+    inv.m[2][1] = m->m[1][2];
+    inv.m[2][2] = m->m[2][2];
+    inv.m[3][0] = -(m->m[3][0] * inv.m[0][0] + m->m[3][1] * inv.m[1][0] + m->m[3][2] * inv.m[2][0]);
+    inv.m[3][1] = -(m->m[3][0] * inv.m[0][1] + m->m[3][1] * inv.m[1][1] + m->m[3][2] * inv.m[2][1]);
+    inv.m[3][2] = -(m->m[3][0] * inv.m[0][2] + m->m[3][1] * inv.m[1][2] + m->m[3][2] * inv.m[2][2]);
+    return inv;
+}
 // --- Line and Triangle Drawing ---
 void DrawLine(int x0, int y0, int x1, int y1)
 {
@@ -353,77 +432,202 @@ int cmp(const void *a, const void *b)
     return 0;
 }
 
+// --- Triangle Clipping Utilities ---
+// Returns number of output triangles (0, 1, or 2)
+static inline float dist_to_plane(const Vector3 *p, Vector3 plane_p, Vector3 plane_n)
+{
+    return plane_n.x * p->x + plane_n.y * p->y + plane_n.z * p->z - vec3_dot(plane_n, plane_p);
+}
+int Triangle_ClipAgainstPlane(Vector3 plane_p, Vector3 plane_n, Triangle *in_tri, Triangle *out_tri1, Triangle *out_tri2)
+{
+    plane_n = vec3_normalize(plane_n);
+    Vector3 *inside_points[3];
+    int nInsidePointCount = 0;
+    Vector3 *outside_points[3];
+    int nOutsidePointCount = 0;
+    float d0 = dist_to_plane(&in_tri->points[0], plane_p, plane_n);
+    float d1 = dist_to_plane(&in_tri->points[1], plane_p, plane_n);
+    float d2 = dist_to_plane(&in_tri->points[2], plane_p, plane_n);
+    float t;
+    Vector3 dir;
+    if (d0 >= 0)
+    {
+        inside_points[nInsidePointCount++] = &in_tri->points[0];
+    }
+    else
+    {
+        outside_points[nOutsidePointCount++] = &in_tri->points[0];
+    }
+    if (d1 >= 0)
+    {
+        inside_points[nInsidePointCount++] = &in_tri->points[1];
+    }
+    else
+    {
+        outside_points[nOutsidePointCount++] = &in_tri->points[1];
+    }
+    if (d2 >= 0)
+    {
+        inside_points[nInsidePointCount++] = &in_tri->points[2];
+    }
+    else
+    {
+        outside_points[nOutsidePointCount++] = &in_tri->points[2];
+    }
+    if (nInsidePointCount == 0)
+        return 0;
+    if (nInsidePointCount == 3)
+    {
+        *out_tri1 = *in_tri;
+        return 1;
+    }
+    if (nInsidePointCount == 1 && nOutsidePointCount == 2)
+    {
+        out_tri1->points[0] = *inside_points[0];
+        dir = vec3_sub(*outside_points[0], *inside_points[0]);
+        t = -dist_to_plane(inside_points[0], plane_p, plane_n) / (dist_to_plane(outside_points[0], plane_p, plane_n) - dist_to_plane(inside_points[0], plane_p, plane_n));
+        out_tri1->points[1] = vec3_add(*inside_points[0], vec3_scale(dir, t));
+        dir = vec3_sub(*outside_points[1], *inside_points[0]);
+        t = -dist_to_plane(inside_points[0], plane_p, plane_n) / (dist_to_plane(outside_points[1], plane_p, plane_n) - dist_to_plane(inside_points[0], plane_p, plane_n));
+        out_tri1->points[2] = vec3_add(*inside_points[0], vec3_scale(dir, t));
+        return 1;
+    }
+    if (nInsidePointCount == 2 && nOutsidePointCount == 1)
+    {
+        out_tri1->points[0] = *inside_points[0];
+        out_tri1->points[1] = *inside_points[1];
+        dir = vec3_sub(*outside_points[0], *inside_points[0]);
+        t = -dist_to_plane(inside_points[0], plane_p, plane_n) / (dist_to_plane(outside_points[0], plane_p, plane_n) - dist_to_plane(inside_points[0], plane_p, plane_n));
+        out_tri1->points[2] = vec3_add(*inside_points[0], vec3_scale(dir, t));
+        out_tri2->points[0] = *inside_points[1];
+        out_tri2->points[1] = out_tri1->points[2];
+        dir = vec3_sub(*outside_points[0], *inside_points[1]);
+        t = -dist_to_plane(inside_points[1], plane_p, plane_n) / (dist_to_plane(outside_points[0], plane_p, plane_n) - dist_to_plane(inside_points[1], plane_p, plane_n));
+        out_tri2->points[2] = vec3_add(*inside_points[1], vec3_scale(dir, t));
+        return 2;
+    }
+    return 0;
+}
+
 // --- Main Render Loop ---
 void Tick()
 {
     static int frameCount = 0;
     printf("Frame: %d\n", frameCount++);
     ClearScreen();
-    theta += 0.005f;
+       theta += 0.005f;
+
+    // --- Camera Movement/Input ---
+    float moveSpeed = 0.1f;
+    float rotSpeed = 0.03f;
+    Vector3 forward = vec3_normalize(LookDir);
+    Vector3 right = vec3_normalize(vec3_cross(forward, (Vector3){0, 1, 0}));
+    if (cocoa_is_key_down(KEY_W) || cocoa_is_key_down(KEY_UP))
+        Camera = vec3_add(Camera, vec3_scale(forward, moveSpeed));
+    if (cocoa_is_key_down(KEY_S) || cocoa_is_key_down(KEY_DOWN))
+        Camera = vec3_sub(Camera, vec3_scale(forward, moveSpeed));
+    if (cocoa_is_key_down(KEY_A) || cocoa_is_key_down(KEY_LEFT))
+        Camera = vec3_sub(Camera, vec3_scale(right, moveSpeed));
+    if (cocoa_is_key_down(KEY_D) || cocoa_is_key_down(KEY_RIGHT))
+        Camera = vec3_add(Camera, vec3_scale(right, moveSpeed));
+    if (cocoa_is_key_down(12))
+        Yaw -= rotSpeed; // Q
+    if (cocoa_is_key_down(14))
+        Yaw += rotSpeed; // E
+    LookDir.x = sinf(Yaw);
+    LookDir.z = cosf(Yaw);
 
     // --- Rotation Matrices ---
-
-    Matrix4x4 rotationZ, rotationX, rotationY, translation, world, temp;
+    Matrix4x4 rotationZ, rotationX, translation, world, temp;
     mat4x4_make_rotation_z(&rotationZ, theta);
-    mat4x4_make_rotation_x(&rotationX, theta * 0.5f);
+    mat4x4_make_rotation_x(&rotationX, theta * 0.5f + 3.14159265f);
     mat4x4_make_translation(&translation, 0.0f, 0.0f, 8.0f);
     mat4x4_multiplyMatrix(&temp, &rotationZ, &rotationX);
     mat4x4_multiplyMatrix(&world, &temp, &translation);
 
-    // --- Allocate Raster List ---
+    // --- Camera/View Matrix ---
+    Vector3 up = {0, 1, 0};
+    Vector3 target = vec3_add(Camera, LookDir);
+    Matrix4x4 matCamera = Matrix_PointAt(Camera, target, up);
+    Matrix4x4 matView = Matrix_QuickInverse(&matCamera);
 
-    TriangleToRaster *trisToRaster = malloc(sizeof(TriangleToRaster) * cubeMesh.triangleCount);
+    // --- Allocate Raster List ---
+    TriangleToRaster *trisToRaster = malloc(sizeof(TriangleToRaster) * cubeMesh.triangleCount * 8);
     size_t trisToRasterCount = 0;
 
     for (size_t i = 0; i < cubeMesh.triangleCount; i++)
     {
-        Triangle projected, translated, rotatedZ, rotatedZX;
-        for (int j = 0; j < 3; j++)
-            MultiplyMatrixVector(&cubeMesh.triangles[i].points[j], &rotatedZ.points[j], &world);
-        translated = rotatedZ; // Now 'rotatedZ' is actually world-transformed
-
-        // --- Backface Culling ---
-
-        Vector3 line1 = vec3_sub(translated.points[1], translated.points[0]);
-        Vector3 line2 = vec3_sub(translated.points[2], translated.points[0]);
-        Vector3 normal = vec3_normalize(vec3_cross(line1, line2));
-        if (vec3_dot(normal, vec3_sub(translated.points[0], Camera)) > 0.0f)
-            continue; // Cull
-
-        // --- Lighting ---
-
-        Vector3 lightDirection = vec3_normalize((Vector3){0.0f, 0.0f, -1.0f});
-        float dotProduct = vec3_dot(normal, lightDirection);
-        // --- Project to 2D ---
-        for (int j = 0; j < 3; j++)
-            MultiplyMatrixVector(&translated.points[j], &projected.points[j], &projectionMatrix);
+        // --- 1. World Transform ---
+        Vector4 triInput[3];
         for (int j = 0; j < 3; j++)
         {
-            projected.points[j].x += 1.0f;
-            projected.points[j].y += 1.0f;
-            projected.points[j].x *= 0.5f * SCREEN_WIDTH;
-            projected.points[j].y *= 0.5f * SCREEN_HEIGHT;
+            triInput[j] = (Vector4){cubeMesh.triangles[i].points[j].x, cubeMesh.triangles[i].points[j].y, cubeMesh.triangles[i].points[j].z, 1.0f};
+            MultiplyMatrixVector4(&triInput[j], &triInput[j], &world);
         }
-
-        // --- Shading ---
-
-        float shade = vec3_dot(normal, lightDirection);
-        if (shade < AMBIENT_LIGHT_INTENSITY)
-            shade = AMBIENT_LIGHT_INTENSITY;
-        if (shade > 1.0f)
-            shade = 1.0f;
-
-        // --- Depth for Sorting ---
-
-        float avgDepth = (projected.points[0].z + projected.points[1].z + projected.points[2].z) / 3.0f;
-        trisToRaster[trisToRasterCount].tri = projected;
-        trisToRaster[trisToRasterCount].avgDepth = avgDepth;
-        trisToRaster[trisToRasterCount].shade = shade;
-        trisToRasterCount++;
+        // --- 2. Calculate Normal ---
+        Vector3 line1 = vec3_sub((Vector3){triInput[1].x, triInput[1].y, triInput[1].z}, (Vector3){triInput[0].x, triInput[0].y, triInput[0].z});
+        Vector3 line2 = vec3_sub((Vector3){triInput[2].x, triInput[2].y, triInput[2].z}, (Vector3){triInput[0].x, triInput[0].y, triInput[0].z});
+        Vector3 normal = vec3_normalize(vec3_cross(line1, line2));
+        // --- 3. Backface Culling ---
+        Vector3 cameraRay = vec3_sub((Vector3){triInput[0].x, triInput[0].y, triInput[0].z}, Camera);
+        if (vec3_dot(normal, cameraRay) < 0.0f)
+        {
+            // --- 4. Lighting ---
+            Vector3 light_direction = vec3_normalize((Vector3){0.0f, 1.0f, -1.0f});
+            float shade = fmaxf(0.1f, vec3_dot(light_direction, normal));
+            // --- 5. View Transform ---
+            Vector4 triViewed[3];
+            for (int j = 0; j < 3; j++)
+                MultiplyMatrixVector4(&triInput[j], &triViewed[j], &matView);
+            // --- 6. Near Plane Clipping ---
+            Triangle triViewedSimple = {
+                .points[0] = (Vector3){triViewed[0].x, triViewed[0].y, triViewed[0].z},
+                .points[1] = (Vector3){triViewed[1].x, triViewed[1].y, triViewed[1].z},
+                .points[2] = (Vector3){triViewed[2].x, triViewed[2].y, triViewed[2].z}};
+            Triangle clipped[2];
+            int nClippedTriangles = Triangle_ClipAgainstPlane((Vector3){0, 0, 0.1f}, (Vector3){0, 0, 1}, &triViewedSimple, &clipped[0], &clipped[1]);
+            for (int n = 0; n < nClippedTriangles; n++)
+            {
+                // --- 7. Projection ---
+                Vector4 triProjected[3];
+                for (int j = 0; j < 3; j++)
+                {
+                    Vector4 v = {clipped[n].points[j].x, clipped[n].points[j].y, clipped[n].points[j].z, 1.0f};
+                    MultiplyMatrixVector4(&v, &triProjected[j], &projectionMatrix);
+                }
+                // --- 8. Perspective Divide ---
+                for (int j = 0; j < 3; j++)
+                {
+                    if (fabsf(triProjected[j].w) > 1e-5f)
+                    {
+                        triProjected[j].x /= triProjected[j].w;
+                        triProjected[j].y /= triProjected[j].w;
+                        triProjected[j].z /= triProjected[j].w;
+                    }
+                }
+                // --- 9. Screen Transform ---
+                for (int j = 0; j < 3; j++)
+                {
+                    triProjected[j].x *= -1.0f;
+                    triProjected[j].y *= -1.0f;
+                    triProjected[j].x += 1.0f;
+                    triProjected[j].y += 1.0f;
+                    triProjected[j].x *= 0.5f * SCREEN_WIDTH;
+                    triProjected[j].y *= 0.5f * SCREEN_HEIGHT;
+                }
+                // --- 10. Store for sorting ---
+                Triangle triToRaster = {
+                    .points[0] = (Vector3){triProjected[0].x, triProjected[0].y, triProjected[0].z},
+                    .points[1] = (Vector3){triProjected[1].x, triProjected[1].y, triProjected[1].z},
+                    .points[2] = (Vector3){triProjected[2].x, triProjected[2].y, triProjected[2].z}};
+                trisToRaster[trisToRasterCount].tri = triToRaster;
+                trisToRaster[trisToRasterCount].avgDepth = (triProjected[0].z + triProjected[1].z + triProjected[2].z) / 3.0f;
+                trisToRaster[trisToRasterCount].shade = shade;
+                trisToRasterCount++;
+            }
+        }
     }
-
-    // --- Sort and Rasterize ---
-
+    // --- Painter's Algorithm Sort ---
     qsort(trisToRaster, trisToRasterCount, sizeof(TriangleToRaster), cmp);
     for (size_t i = 0; i < trisToRasterCount; i++)
     {
@@ -448,3 +652,5 @@ int main()
     cocoa_start(SCREEN_WIDTH, SCREEN_HEIGHT, 0, Tick);
     return 0;
 }
+
+// (Optional) Input handling stubs for camera movement can be added here if platform allows

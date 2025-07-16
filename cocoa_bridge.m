@@ -7,6 +7,16 @@ static int bufferWidth = 0, bufferHeight = 0;
 static int target_fps = 60;
 static void (*frame_callback)(void) = NULL;
 
+// --- Minimal Key State Tracking ---
+#define COCOA_KEY_MAX 256
+static uint8_t key_state[COCOA_KEY_MAX] = {0};
+
+// Expose to C
+int cocoa_is_key_down(int keycode) {
+    if (keycode < 0 || keycode >= COCOA_KEY_MAX) return 0;
+    return key_state[keycode];
+}
+
 @interface CView : NSView
 @end
 
@@ -30,6 +40,16 @@ static void (*frame_callback)(void) = NULL;
     CGContextRelease(ctx);
     CGColorSpaceRelease(cs);
 }
+
+- (BOOL)acceptsFirstResponder { return YES; }
+- (void)keyDown:(NSEvent *)event {
+    unsigned short code = [event keyCode];
+    if (code < COCOA_KEY_MAX) key_state[code] = 1;
+}
+- (void)keyUp:(NSEvent *)event {
+    unsigned short code = [event keyCode];
+    if (code < COCOA_KEY_MAX) key_state[code] = 0;
+}
 @end
 
 @interface CAppDelegate : NSObject <NSApplicationDelegate>
@@ -51,6 +71,8 @@ static void (*frame_callback)(void) = NULL;
     [window setContentView:view];
     [window makeKeyAndOrderFront:nil];
     [NSApp activateIgnoringOtherApps:YES];
+    [window makeFirstResponder:view];
+    [view becomeFirstResponder];
 
     double interval = (target_fps > 0) ? (1.0 / target_fps) : 0.0;
 
