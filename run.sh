@@ -1,5 +1,5 @@
 #!/bin/bash
 
-clang main.c cocoa_bridge.m -framework Cocoa -o cube
+clang -framework Cocoa -framework Metal -framework MetalKit -framework QuartzCore -framework Foundation main.c metal_bridge.m -o cube
 
 ./cube

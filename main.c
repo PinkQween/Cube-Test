@@ -6,11 +6,10 @@
 #include <stdio.h>
 #include <stdbool.h>
 
-// --- External Cocoa Bridge Functions ---
-extern void cocoa_start(int width, int height, int maxFPS, void (*callback)(void));
-extern void draw_pixel(int x, int y, uint8_t r, uint8_t g, uint8_t b, uint8_t a);
-extern void present_frame(void);
-extern int cocoa_is_key_down(int keycode); // key state from cocoa_bridge
+// --- External Metal Bridge Functions ---
+extern void metal_start(int width, int height, int maxFPS, void (*callback)(void));
+extern void metal_draw_mesh(const float *vertices, const float *uvs, int vertex_count, const uint8_t *texture, int tex_w, int tex_h);
+extern void metal_set_key_callback(void (*key_callback)(int key, bool pressed));
 
 #define SCREEN_WIDTH 800
 #define SCREEN_HEIGHT 800
@@ -18,9 +17,9 @@ extern int cocoa_is_key_down(int keycode); // key state from cocoa_bridge
 
 // macOS virtual key codes for WASD and arrows
 #define KEY_W 13
-#define KEY_A 0
+#define KEY_A 2
 #define KEY_S 1
-#define KEY_D 2
+#define KEY_D 0
 #define KEY_UP 126
 #define KEY_DOWN 125
 #define KEY_LEFT 123
@@ -30,6 +29,12 @@ extern int cocoa_is_key_down(int keycode); // key state from cocoa_bridge
 static const float AMBIENT_LIGHT_INTENSITY = 0.8f;
 
 // --- Math Types ---
+
+typedef struct
+{
+    float u, v;
+} Vector2;
+
 typedef struct
 {
     float x, y, z;
@@ -43,12 +48,19 @@ typedef struct
 typedef struct
 {
     Vector3 points[3];
+    Vector2 textureCoordinates[3];
 } Triangle;
 typedef struct
 {
     Triangle *triangles;
     size_t triangleCount;
 } Mesh;
+
+typedef struct
+{
+    int width, height;
+    uint8_t *data; // RGB or RGBA
+} Texture;
 
 // --- Matrix Type ---
 typedef struct
@@ -192,9 +204,12 @@ bool LoadFromObjectFile(Mesh *m, const char *filename)
     if (!f)
         return false;
     Vector3 *verts = NULL;
-    size_t vertCount = 0;
+    Vector2 *texcoords = NULL;
+    size_t vertCount = 0, vertCap = 0;
+    size_t texCount = 0, texCap = 0;
     m->triangles = NULL;
     m->triangleCount = 0;
+    size_t triCap = 0;
     char line[LINE_MAX_LEN];
     while (fgets(line, sizeof(line), f))
     {
@@ -203,25 +218,72 @@ bool LoadFromObjectFile(Mesh *m, const char *filename)
             Vector3 v;
             if (sscanf(line, "v %f %f %f", &v.x, &v.y, &v.z) == 3)
             {
-                verts = realloc(verts, sizeof(Vector3) * (vertCount + 1));
+                if (vertCount == vertCap)
+                {
+                    vertCap = vertCap ? vertCap * 2 : 128;
+                    verts = realloc(verts, sizeof(Vector3) * vertCap);
+                }
                 verts[vertCount++] = v;
             }
         }
-        if (line[0] == 'f' && line[1] == ' ')
+        else if (line[0] == 'v' && line[1] == 't')
         {
-            int fIdx[3];
-            if (sscanf(line, "f %d %d %d", &fIdx[0], &fIdx[1], &fIdx[2]) == 3)
+            Vector2 t;
+            if (sscanf(line, "vt %f %f", &t.u, &t.v) == 2)
             {
+                if (texCount == texCap)
+                {
+                    texCap = texCap ? texCap * 2 : 128;
+                    texcoords = realloc(texcoords, sizeof(Vector2) * texCap);
+                }
+                texcoords[texCount++] = t;
+            }
+        }
+        else if (line[0] == 'f' && line[1] == ' ')
+        {
+            int vIdx[3], tIdx[3];
+            int matches = sscanf(line, "f %d/%d %d/%d %d/%d", &vIdx[0], &tIdx[0], &vIdx[1], &tIdx[1], &vIdx[2], &tIdx[2]);
+            if (matches == 6)
+            {
+                if (m->triangleCount == triCap)
+                {
+                    triCap = triCap ? triCap * 2 : 128;
+                    m->triangles = realloc(m->triangles, sizeof(Triangle) * triCap);
+                }
                 Triangle t = {
-                    .points[0] = verts[fIdx[0] - 1],
-                    .points[1] = verts[fIdx[1] - 1],
-                    .points[2] = verts[fIdx[2] - 1]};
-                m->triangles = realloc(m->triangles, sizeof(Triangle) * (m->triangleCount + 1));
+                    .points[0] = verts[vIdx[0] - 1],
+                    .points[1] = verts[vIdx[1] - 1],
+                    .points[2] = verts[vIdx[2] - 1],
+                    .textureCoordinates[0] = texcoords[tIdx[0] - 1],
+                    .textureCoordinates[1] = texcoords[tIdx[1] - 1],
+                    .textureCoordinates[2] = texcoords[tIdx[2] - 1]};
                 m->triangles[m->triangleCount++] = t;
+            }
+            else
+            {
+                // fallback: faces without texture coordinates
+                int fIdx[3];
+                if (sscanf(line, "f %d %d %d", &fIdx[0], &fIdx[1], &fIdx[2]) == 3)
+                {
+                    if (m->triangleCount == triCap)
+                    {
+                        triCap = triCap ? triCap * 2 : 128;
+                        m->triangles = realloc(m->triangles, sizeof(Triangle) * triCap);
+                    }
+                    Triangle t = {
+                        .points[0] = verts[fIdx[0] - 1],
+                        .points[1] = verts[fIdx[1] - 1],
+                        .points[2] = verts[fIdx[2] - 1],
+                        .textureCoordinates[0] = (Vector2){0, 0},
+                        .textureCoordinates[1] = (Vector2){0, 0},
+                        .textureCoordinates[2] = (Vector2){0, 0}};
+                    m->triangles[m->triangleCount++] = t;
+                }
             }
         }
     }
     free(verts);
+    free(texcoords);
     fclose(f);
     return true;
 }
@@ -233,6 +295,35 @@ Vector3 Camera = {0.0f, 0.0f, 0.0f};
 Vector3 LookDir = {0.0f, 0.0f, 1.0f};
 float Yaw = 0.0f;
 float theta = 0.0f;
+
+// Keyboard state
+static bool keyStates[256] = {false};
+
+// --- Texture Global ---
+Texture gTexture;
+bool gTextureLoaded = false;
+
+// --- Z-Buffer ---
+static float zbuffer[SCREEN_WIDTH * SCREEN_HEIGHT];
+// --- Framebuffer ---
+static uint32_t framebuffer[SCREEN_WIDTH * SCREEN_HEIGHT]; // RGBA 8:8:8:8
+
+// --- Framebuffer Pixel Write ---
+static inline void framebuffer_set_pixel(int x, int y, uint8_t r, uint8_t g, uint8_t b, uint8_t a)
+{
+    if (x >= 0 && x < SCREEN_WIDTH && y >= 0 && y < SCREEN_HEIGHT)
+    {
+        framebuffer[y * SCREEN_WIDTH + x] = ((uint32_t)r << 24) | ((uint32_t)g << 16) | ((uint32_t)b << 8) | (uint32_t)a;
+    }
+}
+
+// --- Screen Clear ---
+void ClearScreen()
+{
+    memset(framebuffer, 0, sizeof(framebuffer));
+}
+// --- Present Framebuffer ---
+// Remove PresentFramebuffer and framebuffer_set_pixel
 
 // --- Matrix-Vector Multiplication ---
 void MultiplyMatrixVector(const Vector3 *in, Vector3 *out, const Matrix4x4 *m)
@@ -312,7 +403,7 @@ void DrawLine(int x0, int y0, int x1, int y1)
     while (1)
     {
         if (x0 >= 0 && x0 < SCREEN_WIDTH && y0 >= 0 && y0 < SCREEN_HEIGHT)
-            draw_pixel(x0, y0, 255, 255, 255, 255);
+            framebuffer_set_pixel(x0, y0, 0, 0, 0, 0);
         if (x0 == x1 && y0 == y1)
             break;
         e2 = 2 * err;
@@ -336,7 +427,7 @@ void DrawTriangle(int x1, int y1, int x2, int y2, int x3, int y3)
 }
 
 // --- Triangle Rasterization ---
-void FillTriangle(int x1, int y1, int x2, int y2, int x3, int y3, uint8_t r, uint8_t g, uint8_t b, uint8_t a)
+void FillTriangle(int x1, int y1, int x2, int y2, int x3, int y3, float t_z1, float t_z2, float t_z3, uint8_t r, uint8_t g, uint8_t b, uint8_t a)
 {
     // Sort the points by y-coordinate ascending (y1 <= y2 <= y3)
     if (y1 > y2)
@@ -386,30 +477,259 @@ void FillTriangle(int x1, int y1, int x2, int y2, int x3, int y3, uint8_t r, uin
         for (int j = ax; j <= bx; j++)
         {
             if (j >= 0 && j < SCREEN_WIDTH && ay >= 0 && ay < SCREEN_HEIGHT)
-                draw_pixel(j, ay, r, g, b, a);
+            {
+                // Z-buffering: interpolate z across the triangle
+                // Barycentric coordinates for z-interpolation
+                float denom = (float)((y2 - y3) * (x1 - x3) + (x3 - x2) * (y1 - y3));
+                float w1 = denom == 0 ? 0 : ((float)((y2 - y3) * (j - x3) + (x3 - x2) * (ay - y3))) / denom;
+                float w2 = denom == 0 ? 0 : ((float)((y3 - y1) * (j - x3) + (x1 - x3) * (ay - y3))) / denom;
+                float w3 = 1.0f - w1 - w2;
+                // Clamp barycentrics
+                if (w1 < 0)
+                    w1 = 0;
+                if (w1 > 1)
+                    w1 = 1;
+                if (w2 < 0)
+                    w2 = 0;
+                if (w2 > 1)
+                    w2 = 1;
+                if (w3 < 0)
+                    w3 = 0;
+                if (w3 > 1)
+                    w3 = 1;
+                // Interpolate z
+                float z = w1 * t_z1 + w2 * t_z2 + w3 * t_z3;
+                int idx = ay * SCREEN_WIDTH + j;
+                if (z < zbuffer[idx])
+                {
+                    zbuffer[idx] = z;
+                    framebuffer_set_pixel(j, ay, r, g, b, a);
+                }
+            }
         }
     }
 }
 
-// --- Screen Clear ---
-void ClearScreen()
+// --- Texture Support ---
+// Load a binary P6 PPM file (RGB, 8 bits per channel)
+bool LoadPPM(Texture *tex, const char *filename)
 {
-    for (int y = 0; y < SCREEN_HEIGHT; y++)
-        for (int x = 0; x < SCREEN_WIDTH; x++)
-            draw_pixel(x, y, 0, 0, 0, 0); // black
+    FILE *f = fopen(filename, "rb");
+    if (!f)
+        return false;
+    char header[3];
+    if (fscanf(f, "%2s", header) != 1 || strcmp(header, "P6") != 0)
+    {
+        fclose(f);
+        return false;
+    }
+    int maxval;
+    // Skip comments
+    int c;
+    do
+    {
+        c = fgetc(f);
+    } while (c == '#');
+    ungetc(c, f);
+    if (fscanf(f, "%d %d %d", &tex->width, &tex->height, &maxval) != 3)
+    {
+        fclose(f);
+        return false;
+    }
+    if (maxval != 255)
+    {
+        fclose(f);
+        return false;
+    }
+    fgetc(f); // skip single whitespace after header
+    size_t sz = tex->width * tex->height * 3;
+    tex->data = malloc(sz);
+    if (!tex->data)
+    {
+        fclose(f);
+        return false;
+    }
+    if (fread(tex->data, 1, sz, f) != sz)
+    {
+        free(tex->data);
+        fclose(f);
+        return false;
+    }
+    fclose(f);
+    return true;
 }
 
-// --- Engine Initialization ---
-void InitEngine()
+void FreeTexture(Texture *tex)
 {
-    if (!LoadFromObjectFile(&cubeMesh, "./teapot.obj"))
+    if (tex->data)
+        free(tex->data);
+    tex->data = NULL;
+    tex->width = tex->height = 0;
+}
+
+// Sample a color from the texture at (u, v) in [0,1] range
+static inline void sample_texture(const Texture *tex, float u, float v, uint8_t *r, uint8_t *g, uint8_t *b)
+{
+    if (!tex || !tex->data)
     {
-        fprintf(stderr, "Failed to load ./teapot.obj\n");
-        exit(1);
+        *r = *g = *b = 255;
+        return;
     }
-    float nearPlane = 0.1f, farPlane = 1000.0f, fov = 90.0f;
-    float aspectRatio = (float)SCREEN_HEIGHT / (float)SCREEN_WIDTH;
-    mat4x4_make_projection(&projectionMatrix, fov, aspectRatio, nearPlane, farPlane);
+    // Clamp and wrap
+    if (u < 0)
+        u = 0;
+    if (u > 1)
+        u = 1;
+    if (v < 0)
+        v = 0;
+    if (v > 1)
+        v = 1;
+    int x = (int)(u * (tex->width - 1));
+    int y = (int)(v * (tex->height - 1));
+    int idx = (y * tex->width + x) * 3;
+    *r = tex->data[idx];
+    *g = tex->data[idx + 1];
+    *b = tex->data[idx + 2];
+}
+
+// --- Textured Triangle Rasterization ---
+void FillTexturedTriangle(
+    int x1, int y1, float u1, float v1, float w1,
+    int x2, int y2, float u2, float v2, float w2,
+    int x3, int y3, float u3, float v3, float w3,
+    float t_z1, float t_z2, float t_z3,
+    const Texture *tex)
+{
+    // Sort the points by y-coordinate ascending (y1 <= y2 <= y3)
+    if (y1 > y2)
+    {
+        int t = y1;
+        y1 = y2;
+        y2 = t;
+        t = x1;
+        x1 = x2;
+        x2 = t;
+        float tf;
+        tf = u1;
+        u1 = u2;
+        u2 = tf;
+        tf = v1;
+        v1 = v2;
+        v2 = tf;
+        tf = w1;
+        w1 = w2;
+        w2 = tf;
+        tf = t_z1;
+        t_z1 = t_z2;
+        t_z2 = tf;
+    }
+    if (y1 > y3)
+    {
+        int t = y1;
+        y1 = y3;
+        y3 = t;
+        t = x1;
+        x1 = x3;
+        x3 = t;
+        float tf;
+        tf = u1;
+        u1 = u3;
+        u3 = tf;
+        tf = v1;
+        v1 = v3;
+        v3 = tf;
+        tf = w1;
+        w1 = w3;
+        w3 = tf;
+        tf = t_z1;
+        t_z1 = t_z3;
+        t_z3 = tf;
+    }
+    if (y2 > y3)
+    {
+        int t = y2;
+        y2 = y3;
+        y3 = t;
+        t = x2;
+        x2 = x3;
+        x3 = t;
+        float tf;
+        tf = u2;
+        u2 = u3;
+        u3 = tf;
+        tf = v2;
+        v2 = v3;
+        v3 = tf;
+        tf = w2;
+        w2 = w3;
+        w3 = tf;
+        tf = t_z2;
+        t_z2 = t_z3;
+        t_z3 = tf;
+    }
+    int total_height = y3 - y1;
+    for (int i = 0; i < total_height; i++)
+    {
+        int second_half = i > y2 - y1 || y2 == y1;
+        int segment_height = second_half ? y3 - y2 : y2 - y1;
+        float alpha = total_height == 0 ? 0.0f : (float)i / total_height;
+        float beta = segment_height == 0 ? 0.0f : (float)(i - (second_half ? y2 - y1 : 0)) / segment_height;
+        int ax = x1 + (int)((x3 - x1) * alpha);
+        int bx = second_half ? x2 + (int)((x3 - x2) * beta) : x1 + (int)((x2 - x1) * beta);
+        float au = u1 + (u3 - u1) * alpha;
+        float av = v1 + (v3 - v1) * alpha;
+        float aw = w1 + (w3 - w1) * alpha;
+        float az = t_z1 + (t_z3 - t_z1) * alpha;
+        float bu = second_half ? u2 + (u3 - u2) * beta : u1 + (u2 - u1) * beta;
+        float bv = second_half ? v2 + (v3 - v2) * beta : v1 + (v2 - v1) * beta;
+        float bw = second_half ? w2 + (w3 - w2) * beta : w1 + (w2 - w1) * beta;
+        float bz = second_half ? t_z2 + (t_z3 - t_z2) * beta : t_z1 + (t_z2 - t_z1) * beta;
+        if (ax > bx)
+        {
+            int t = ax;
+            ax = bx;
+            bx = t;
+            float tf;
+            tf = au;
+            au = bu;
+            bu = tf;
+            tf = av;
+            av = bv;
+            bv = tf;
+            tf = aw;
+            aw = bw;
+            bw = tf;
+            tf = az;
+            az = bz;
+            bz = tf;
+        }
+        for (int j = ax; j <= bx; j++)
+        {
+            float phi = bx == ax ? 1.0f : (float)(j - ax) / (float)(bx - ax);
+            float u = au + (bu - au) * phi;
+            float v = av + (bv - av) * phi;
+            float w = aw + (bw - aw) * phi;
+            float z = az + (bz - az) * phi;
+            int px = j;
+            int py = y1 + i;
+            if (px >= 0 && px < SCREEN_WIDTH && py >= 0 && py < SCREEN_HEIGHT)
+            {
+                // Barycentric for z-buffer
+                int idx = py * SCREEN_WIDTH + px;
+                if (z < zbuffer[idx])
+                {
+                    zbuffer[idx] = z;
+                    // Perspective correct
+                    float inv_w = 1.0f / w;
+                    float tex_u = u * inv_w;
+                    float tex_v = v * inv_w;
+                    uint8_t r, g, b;
+                    sample_texture(tex, tex_u, tex_v, &r, &g, &b);
+                    framebuffer_set_pixel(px, py, r, g, b, 255);
+                }
+            }
+        }
+    }
 }
 
 // --- Triangle Raster Info for Sorting ---
@@ -509,33 +829,94 @@ int Triangle_ClipAgainstPlane(Vector3 plane_p, Vector3 plane_n, Triangle *in_tri
     return 0;
 }
 
+// --- Keyboard Input Handler ---
+void handle_key_input(int key, bool pressed)
+{
+    if (key >= 0 && key < 256)
+    {
+        keyStates[key] = pressed;
+    }
+}
+
+// --- Camera Movement ---
+void update_camera()
+{
+    float moveSpeed = 0.1f;
+    float rotateSpeed = 0.02f;
+
+    // Forward/Backward movement
+    if (keyStates[KEY_W])
+    {
+        Camera = vec3_add(Camera, vec3_scale(LookDir, moveSpeed));
+    }
+    if (keyStates[KEY_S])
+    {
+        Camera = vec3_sub(Camera, vec3_scale(LookDir, moveSpeed));
+    }
+
+    // Left/Right movement
+    Vector3 right = vec3_cross(LookDir, (Vector3){0, 1, 0});
+    if (keyStates[KEY_A])
+    {
+        Camera = vec3_sub(Camera, vec3_scale(right, moveSpeed));
+    }
+    if (keyStates[KEY_D])
+    {
+        Camera = vec3_add(Camera, vec3_scale(right, moveSpeed));
+    }
+
+    // Up/Down movement
+    if (keyStates[KEY_UP])
+    {
+        Camera.y += moveSpeed;
+    }
+    if (keyStates[KEY_DOWN])
+    {
+        Camera.y -= moveSpeed;
+    }
+
+    // Left/Right rotation
+    if (keyStates[KEY_LEFT])
+    {
+        Yaw -= rotateSpeed;
+    }
+    if (keyStates[KEY_RIGHT])
+    {
+        Yaw += rotateSpeed;
+    }
+
+    // Update look direction based on yaw
+    LookDir.x = sinf(Yaw);
+    LookDir.z = cosf(Yaw);
+}
+
+// --- Engine Initialization ---
+void InitEngine()
+{
+    if (!LoadFromObjectFile(&cubeMesh, "./cube.obj"))
+    {
+        fprintf(stderr, "Failed to load ./cube.obj\n");
+        exit(1);
+    }
+    float nearPlane = 0.1f, farPlane = 1000.0f, fov = 90.0f;
+    float aspectRatio = (float)SCREEN_WIDTH / (float)SCREEN_HEIGHT;
+    mat4x4_make_projection(&projectionMatrix, fov, aspectRatio, nearPlane, farPlane);
+    // Load texture
+    gTextureLoaded = LoadPPM(&gTexture, "./hannaskairipa.ppm");
+    if (!gTextureLoaded)
+    {
+        fprintf(stderr, "Warning: Failed to load ./hannaskairipa.ppm, rendering will be untextured.\n");
+    }
+}
+
 // --- Main Render Loop ---
 void Tick()
 {
-    static int frameCount = 0;
-    printf("Frame: %d\n", frameCount++);
-    ClearScreen();
-       theta += 0.005f;
+    // Update camera based on keyboard input
+    update_camera();
 
-    // --- Camera Movement/Input ---
-    float moveSpeed = 0.1f;
-    float rotSpeed = 0.03f;
-    Vector3 forward = vec3_normalize(LookDir);
-    Vector3 right = vec3_normalize(vec3_cross(forward, (Vector3){0, 1, 0}));
-    if (cocoa_is_key_down(KEY_W) || cocoa_is_key_down(KEY_UP))
-        Camera = vec3_add(Camera, vec3_scale(forward, moveSpeed));
-    if (cocoa_is_key_down(KEY_S) || cocoa_is_key_down(KEY_DOWN))
-        Camera = vec3_sub(Camera, vec3_scale(forward, moveSpeed));
-    if (cocoa_is_key_down(KEY_A) || cocoa_is_key_down(KEY_LEFT))
-        Camera = vec3_sub(Camera, vec3_scale(right, moveSpeed));
-    if (cocoa_is_key_down(KEY_D) || cocoa_is_key_down(KEY_RIGHT))
-        Camera = vec3_add(Camera, vec3_scale(right, moveSpeed));
-    if (cocoa_is_key_down(12))
-        Yaw -= rotSpeed; // Q
-    if (cocoa_is_key_down(14))
-        Yaw += rotSpeed; // E
-    LookDir.x = sinf(Yaw);
-    LookDir.z = cosf(Yaw);
+    // Update rotation
+    theta += 0.01f;
 
     // --- Rotation Matrices ---
     Matrix4x4 rotationZ, rotationX, translation, world, temp;
@@ -551,10 +932,11 @@ void Tick()
     Matrix4x4 matCamera = Matrix_PointAt(Camera, target, up);
     Matrix4x4 matView = Matrix_QuickInverse(&matCamera);
 
-    // --- Allocate Raster List ---
-    TriangleToRaster *trisToRaster = malloc(sizeof(TriangleToRaster) * cubeMesh.triangleCount * 8);
-    size_t trisToRasterCount = 0;
-
+    // Camera, math, mesh logic stays the same
+    // Instead of drawing to framebuffer, collect mesh data for Metal
+    // For now, just send the visible triangles to Metal
+    static float vertices[100000 * 15]; // 3 vertices * 5 floats per vertex (x,y,z,u,v)
+    int vtx_count = 0;
     for (size_t i = 0; i < cubeMesh.triangleCount; i++)
     {
         // --- 1. World Transform ---
@@ -568,89 +950,54 @@ void Tick()
         Vector3 line1 = vec3_sub((Vector3){triInput[1].x, triInput[1].y, triInput[1].z}, (Vector3){triInput[0].x, triInput[0].y, triInput[0].z});
         Vector3 line2 = vec3_sub((Vector3){triInput[2].x, triInput[2].y, triInput[2].z}, (Vector3){triInput[0].x, triInput[0].y, triInput[0].z});
         Vector3 normal = vec3_normalize(vec3_cross(line1, line2));
-        // --- 3. Backface Culling ---
         Vector3 cameraRay = vec3_sub((Vector3){triInput[0].x, triInput[0].y, triInput[0].z}, Camera);
         if (vec3_dot(normal, cameraRay) < 0.0f)
         {
-            // --- 4. Lighting ---
-            Vector3 light_direction = vec3_normalize((Vector3){0.0f, 1.0f, -1.0f});
-            float shade = fmaxf(0.1f, vec3_dot(light_direction, normal));
             // --- 5. View Transform ---
             Vector4 triViewed[3];
             for (int j = 0; j < 3; j++)
                 MultiplyMatrixVector4(&triInput[j], &triViewed[j], &matView);
-            // --- 6. Near Plane Clipping ---
-            Triangle triViewedSimple = {
-                .points[0] = (Vector3){triViewed[0].x, triViewed[0].y, triViewed[0].z},
-                .points[1] = (Vector3){triViewed[1].x, triViewed[1].y, triViewed[1].z},
-                .points[2] = (Vector3){triViewed[2].x, triViewed[2].y, triViewed[2].z}};
-            Triangle clipped[2];
-            int nClippedTriangles = Triangle_ClipAgainstPlane((Vector3){0, 0, 0.1f}, (Vector3){0, 0, 1}, &triViewedSimple, &clipped[0], &clipped[1]);
-            for (int n = 0; n < nClippedTriangles; n++)
+            // --- 7. Projection ---
+            Vector4 triProjected[3];
+            for (int j = 0; j < 3; j++)
             {
-                // --- 7. Projection ---
-                Vector4 triProjected[3];
-                for (int j = 0; j < 3; j++)
+                Vector4 v = {triViewed[j].x, triViewed[j].y, triViewed[j].z, 1.0f};
+                MultiplyMatrixVector4(&v, &triProjected[j], &projectionMatrix);
+            }
+            // --- 8. Perspective Divide ---
+            for (int j = 0; j < 3; j++)
+            {
+                if (fabsf(triProjected[j].w) > 1e-5f)
                 {
-                    Vector4 v = {clipped[n].points[j].x, clipped[n].points[j].y, clipped[n].points[j].z, 1.0f};
-                    MultiplyMatrixVector4(&v, &triProjected[j], &projectionMatrix);
+                    triProjected[j].x /= triProjected[j].w;
+                    triProjected[j].y /= triProjected[j].w;
+                    triProjected[j].z /= triProjected[j].w;
                 }
-                // --- 8. Perspective Divide ---
-                for (int j = 0; j < 3; j++)
-                {
-                    if (fabsf(triProjected[j].w) > 1e-5f)
-                    {
-                        triProjected[j].x /= triProjected[j].w;
-                        triProjected[j].y /= triProjected[j].w;
-                        triProjected[j].z /= triProjected[j].w;
-                    }
-                }
-                // --- 9. Screen Transform ---
-                for (int j = 0; j < 3; j++)
-                {
-                    triProjected[j].x *= -1.0f;
-                    triProjected[j].y *= -1.0f;
-                    triProjected[j].x += 1.0f;
-                    triProjected[j].y += 1.0f;
-                    triProjected[j].x *= 0.5f * SCREEN_WIDTH;
-                    triProjected[j].y *= 0.5f * SCREEN_HEIGHT;
-                }
-                // --- 10. Store for sorting ---
-                Triangle triToRaster = {
-                    .points[0] = (Vector3){triProjected[0].x, triProjected[0].y, triProjected[0].z},
-                    .points[1] = (Vector3){triProjected[1].x, triProjected[1].y, triProjected[1].z},
-                    .points[2] = (Vector3){triProjected[2].x, triProjected[2].y, triProjected[2].z}};
-                trisToRaster[trisToRasterCount].tri = triToRaster;
-                trisToRaster[trisToRasterCount].avgDepth = (triProjected[0].z + triProjected[1].z + triProjected[2].z) / 3.0f;
-                trisToRaster[trisToRasterCount].shade = shade;
-                trisToRasterCount++;
+            }
+            // --- Store for Metal (normalized device coordinates) ---
+            for (int j = 0; j < 3; j++)
+            {
+                // Position (x, y, z) - already in NDC after perspective divide
+                vertices[vtx_count++] = triProjected[j].x;
+                vertices[vtx_count++] = triProjected[j].y;
+                vertices[vtx_count++] = triProjected[j].z;
+                // UV coordinates
+                vertices[vtx_count++] = cubeMesh.triangles[i].textureCoordinates[j].u;
+                vertices[vtx_count++] = cubeMesh.triangles[i].textureCoordinates[j].v;
             }
         }
     }
-    // --- Painter's Algorithm Sort ---
-    qsort(trisToRaster, trisToRasterCount, sizeof(TriangleToRaster), cmp);
-    for (size_t i = 0; i < trisToRasterCount; i++)
+    if (vtx_count > 0)
     {
-        Triangle *t = &trisToRaster[i].tri;
-        float shade = trisToRaster[i].shade;
-        uint8_t r = (uint8_t)(255 * shade);
-        uint8_t g = (uint8_t)(255 * shade);
-        uint8_t b = (uint8_t)(255 * shade);
-        FillTriangle(
-            (int)t->points[0].x, (int)t->points[0].y,
-            (int)t->points[1].x, (int)t->points[1].y,
-            (int)t->points[2].x, (int)t->points[2].y, r, g, b, 255);
+        metal_draw_mesh(vertices, NULL, vtx_count / 5, gTexture.data, gTexture.width, gTexture.height);
     }
-    free(trisToRaster);
-    present_frame();
 }
 
 // --- Program Entry ---
 int main()
 {
     InitEngine();
-    cocoa_start(SCREEN_WIDTH, SCREEN_HEIGHT, 0, Tick);
+    metal_set_key_callback(handle_key_input);
+    metal_start(SCREEN_WIDTH, SCREEN_HEIGHT, 0, Tick);
     return 0;
 }
-
-// (Optional) Input handling stubs for camera movement can be added here if platform allows
