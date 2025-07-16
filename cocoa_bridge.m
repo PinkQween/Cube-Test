@@ -4,6 +4,7 @@
 
 static uint8_t *pixelBuffer = NULL;
 static int bufferWidth = 0, bufferHeight = 0;
+static int target_fps = 60;
 static void (*frame_callback)(void) = NULL;
 
 @interface CView : NSView
@@ -51,12 +52,22 @@ static void (*frame_callback)(void) = NULL;
     [window makeKeyAndOrderFront:nil];
     [NSApp activateIgnoringOtherApps:YES];
 
-    // Hardcoded 60 FPS timer
-    timer = [NSTimer scheduledTimerWithTimeInterval:(1.0 / 24.0)
-                                             target:self
-                                           selector:@selector(tick)
-                                           userInfo:nil
-                                            repeats:YES];
+    double interval = (target_fps > 0) ? (1.0 / target_fps) : 0.0;
+
+    if (interval > 0.0) {
+        timer = [NSTimer scheduledTimerWithTimeInterval:interval
+                                                 target:self
+                                               selector:@selector(tick)
+                                               userInfo:nil
+                                                repeats:YES];
+    } else {
+        // Unlimited FPS simulation — high-speed timer
+        timer = [NSTimer scheduledTimerWithTimeInterval:(1.0 / 1000.0)
+                                                 target:self
+                                               selector:@selector(tick)
+                                               userInfo:nil
+                                                repeats:YES];
+    }
 }
 
 - (void)tick {
@@ -67,10 +78,11 @@ static void (*frame_callback)(void) = NULL;
 @end
 
 // C-callable entry point
-void cocoa_start(int width, int height, void (*callback)(void)) {
+void cocoa_start(int width, int height, int maxFPS, void (*callback)(void)) {
     bufferWidth = width;
     bufferHeight = height;
     frame_callback = callback;
+    target_fps = maxFPS;
     pixelBuffer = calloc(width * height * 4, 1);
 
     @autoreleasepool {
